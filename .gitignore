@@ -1,0 +1,22 @@
+# Virtual Environments
+venv/
+env/
+leak_ui_env/
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+.Python
+
+# Streamlit
+.streamlit/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
