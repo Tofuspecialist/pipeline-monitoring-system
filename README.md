@@ -17,4 +17,3 @@ st.markdown("""
 **Adarsh A S** B.Tech in Artificial Intelligence and Data Science  
 **Sidharth T S** B.Tech in Artificial Intelligence and Data Science  
 **Arjun A Menon** B.Tech in Artificial Intelligence and Data Science
-""")
