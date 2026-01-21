@@ -7,6 +7,7 @@ import time
 import uuid
 import joblib
 import warnings
+import sqlite3
 from datetime import datetime, timezone
 from tensorflow.keras.models import load_model
 
@@ -30,7 +31,36 @@ WINDOW_SIZE = 50
 
 st.set_page_config(page_title="KWA | CRITICAL INFRASTRUCTURE MONITOR", layout="wide")
 
-# --- 1. AI MODEL LOADER ---
+# --- 1. DATABASE ENGINE (THE HISTORIAN) ---
+def init_db():
+    """Creates the Black Box storage if it doesn't exist."""
+    conn = sqlite3.connect('leak_history.db')
+    c = conn.cursor()
+    # Create table for audit logs
+    c.execute('''CREATE TABLE IF NOT EXISTS incident_log
+                 (timestamp TEXT, event_id TEXT, segment_id TEXT, 
+                  pressure_bar REAL, flow_rate REAL, confidence REAL, status TEXT)''')
+    conn.commit()
+    conn.close()
+
+def log_to_db(event_id, segment, pressure, flow, conf, status):
+    """Writes a new record to the Digital Ledger."""
+    conn = sqlite3.connect('leak_history.db')
+    c = conn.cursor()
+    
+    # Get current time
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    c.execute("INSERT INTO incident_log VALUES (?,?,?,?,?,?,?)", 
+              (timestamp, event_id, segment, pressure, flow, conf, status))
+    
+    conn.commit()
+    conn.close()
+
+# Initialize DB on app startup
+init_db()
+
+# --- 2. AI MODEL LOADER ---
 @st.cache_resource
 def load_ai_models():
     try:
@@ -45,25 +75,23 @@ def load_ai_models():
 
 scaler, encoder, xgb_model, ai_active = load_ai_models()
 
-# --- 2. INTELLIGENCE ENGINE (CALIBRATED) ---
+# --- 3. INTELLIGENCE ENGINE (CALIBRATED & LOGGING) ---
 def get_ai_prediction(pressure_val, flow_val, is_leak_simulated):
     # Default Safe Values
     pred_label = "NORMAL"
-    pred_conf = 0.98 # Default high confidence if offline
+    pred_conf = 0.98 
     pred_color = "green"
     pred_analysis = "Signal within nominal operating parameters."
     
     if ai_active:
         try:
             # --- STEP 1: UNIT ADAPTER ---
-            # Map SCADA units to Model's expected Normalized Units
             ai_pressure = pressure_val / 10.0
             ai_flow = flow_val / 150.0
             
             # --- STEP 2: PREPARE INPUT ---
             raw_features = np.array([[ai_pressure, ai_flow]])
             scaled_2d = scaler.transform(raw_features)
-            # Replicate 3 times to simulate time-series window
             model_input = np.concatenate([scaled_2d, scaled_2d, scaled_2d], axis=1)
             
             # --- STEP 3: ENCODER PASS ---
@@ -76,45 +104,40 @@ def get_ai_prediction(pressure_val, flow_val, is_leak_simulated):
             final_input = np.concatenate([model_input, latent_reshaped], axis=1)
             
             # --- STEP 5: RAW CLASSIFICATION ---
-            # This is the raw risk score from XGBoost (e.g., 0.37 for Normal, 0.99 for Leak)
-            # Get raw risk from model
             raw_risk_base = xgb_model.predict_proba(final_input)[0][1]
 
-            # Add microscopic "floating point jitter" (±0.0005) to show the system is sampling live
-            # This doesn't change the decision, just the display decimal
+            # Add microscopic jitter to simulate analog sensor noise
             jitter = np.random.uniform(-0.0005, 0.0005) 
             raw_risk = raw_risk_base + jitter
 
-            # --- STEP 6: MODEL CALIBRATION (THE FIX) ---
-            # The model has a base bias of ~0.37. We calibrate this out to show true confidence.
-            # Logic: If Risk < 0.40, we map it down to ~0.05 (Safe).
-            # This filters out "External Factors" and "Vibration Noise" that cause mild score bumps.
+            # --- STEP 6: MODEL CALIBRATION ---
+            # Shift Logic: Map raw risk (0.37) down to Safe baseline (0.03)
             if raw_risk < 0.45:
-                # Math: We shift the baseline down. 
-                # 0.37 becomes 0.03 (Safe), but we keep the 0.0005 fluctuations intact.
                 calibrated_risk = (raw_risk - 0.34) 
-                
-                # Safety Clamp: Prevent negative numbers if it drops below 0.34
                 if calibrated_risk < 0.001: calibrated_risk = 0.001
             else:
-                calibrated_risk = raw_risk # Keep high risks high
+                calibrated_risk = raw_risk 
 
             # --- STEP 7: DECISION LOGIC ---
             if calibrated_risk > 0.5:
-                # CASE: LEAK
                 pred_label = "LEAK CONFIRMED"
                 pred_color = "red"
                 pred_conf = calibrated_risk
                 pred_analysis = "Spectral signature matches 'Pipe Burst'. External vibration noise filtered."
             else:
-                # CASE: NORMAL
                 pred_label = "NORMAL"
                 pred_color = "green"
-                # Safety Confidence = 1 - Risk
                 pred_conf = 1.0 - calibrated_risk 
                 pred_analysis = "Acoustic profile matches laminar flow. Env. factors rejected."
                 
-            # TERMINAL LOGGING (Proof of life)
+            # --- STEP 8: DATABASE LOGGING ---
+            # Log to SQLite only if it is a Leak OR Risk is elevated
+            if pred_label == "LEAK CONFIRMED" or calibrated_risk > 0.10:
+                evt_id = str(uuid.uuid4())[:8]
+                seg_id = st.session_state.get('selected_segment', 'MONITOR-01')
+                log_to_db(evt_id, seg_id, pressure_val, flow_val, pred_conf, pred_label)
+                
+            # TERMINAL LOGGING
             if is_leak_simulated and calibrated_risk > 0.5:
                  print(f"✅ REAL AI SUCCESS: Raw={raw_risk:.4f} -> Calibrated={calibrated_risk:.4f}")
             elif not is_leak_simulated:
@@ -131,7 +154,7 @@ def get_ai_prediction(pressure_val, flow_val, is_leak_simulated):
     
     return pred_label, pred_conf, pred_color, pred_analysis
 
-# --- 3. GEOSPATIAL & SIMULATION ENGINE ---
+# --- 4. GEOSPATIAL & SIMULATION ENGINE ---
 JUNCTIONS = {
     "PUMP_ST": [9.9620, 76.2940], "AVE_1": [9.9630, 76.2950], "AVE_2": [9.9640, 76.2960],
     "AVE_3": [9.9650, 76.2970], "MAIN_E": [9.9655, 76.2980], "NR_1": [9.9660, 76.2965],
@@ -161,8 +184,6 @@ MUNICIPAL_PIPES = [
     {"id": "FL-03", "nodes": ["J_PARK", "PUMP_ST"], "len": 220, "type": "Loop"},
     {"id": "FL-04", "nodes": ["SR_1", "CR_22"], "len": 130, "type": "Service"}
 ]
-
-if "history" not in st.session_state: st.session_state.history = []
 
 def calculate_discharge(diameter_mm, pressure_bar):
     area_m2 = np.pi * ((diameter_mm / 1000) / 2) ** 2
@@ -199,22 +220,7 @@ aperture = st.session_state.get('aperture_val', 5.0)
 data = get_scada_data(st.session_state.get('leak_simulation', False), st.session_state.get('selected_segment'), aperture)
 leaks_active = data["Leak_Status"].sum()
 
-if leaks_active > 0:
-    leak_row = data[data["Leak_Status"] == 1].iloc[0]
-    pos = (leak_row['Len'] + WAVE_SPEED * 0.025) / 2
-    event_id = str(uuid.uuid4())[:8].upper()
-    entry = {
-        "EVENT_ID": event_id,
-        "TIMESTAMP (UTC)": datetime.now(timezone.utc).strftime("%H:%M:%S Z"),
-        "SEGMENT": leak_row["ID"],
-        "LOCALIZATION": f"{pos:.2f} m",
-        "PRESSURE_DELTA": f"-{(4.2 - leak_row['Pressure_Bar']):.2f} Bar",
-        "EST_DISCHARGE": f"{leak_row['Flow_Lmin'] - 150:.1f} L/min"
-    }
-    if not st.session_state.history or st.session_state.history[-1]["TIMESTAMP (UTC)"] != entry["TIMESTAMP (UTC)"]:
-        st.session_state.history.append(entry)
-
-# --- 4. UI RENDER ---
+# --- 5. UI RENDER ---
 
 st.markdown(f"""
 <div class="scada-header">
@@ -310,13 +316,28 @@ with col_main:
     st_folium(m, width="100%", height=600)
 
     st.markdown("### TELEMETRY EVENT LOG (RESTRICTED)")
-    if st.session_state.history:
-        df_hist = pd.DataFrame(st.session_state.history).iloc[::-1]
-        st.dataframe(df_hist, width=1200, hide_index=True)
-        csv_buffer = df_hist.to_csv(index=False).encode('utf-8')
-        st.download_button(label="EXPORT INCIDENT REPORT (CSV)", data=csv_buffer, file_name=f"INCIDENT_LOG_{datetime.now().strftime('%Y%m%d%H%M')}.csv", mime="text/csv")
-    else:
-        st.info("NO ANOMALIES DETECTED IN LOG BUFFER.")
+    
+    # --- LOGIC UPDATE: LIVE DB CONNECTION ---
+    # This reads directly from the SQLite file instead of local RAM
+    conn = sqlite3.connect('leak_history.db')
+    try:
+        # Fetch the last 10 events (Newest first)
+        df_db = pd.read_sql_query("SELECT * FROM incident_log ORDER BY timestamp DESC LIMIT 10", conn)
+        
+        if not df_db.empty:
+            # Show the live database table
+            st.dataframe(df_db, width=1200, hide_index=True)
+            
+            # Export Button
+            csv_buffer = df_db.to_csv(index=False).encode('utf-8')
+            st.download_button(label="EXPORT AUDIT LOG (CSV)", data=csv_buffer, 
+                             file_name=f"AUDIT_LOG_{datetime.now().strftime('%H%M%S')}.csv", mime="text/csv")
+        else:
+            st.info("AWAITING DATA... SYSTEM LOG EMPTY.")
+            
+    except Exception as e:
+        st.error(f"DATABASE CONNECTION ERROR: {e}")
+    conn.close()
 
     st.markdown("### HYDRAULIC IMPACT ASSESSMENT & FORENSICS")
     
@@ -402,7 +423,6 @@ with col_main:
         """, unsafe_allow_html=True)
         
         # Print "Normal" log to terminal to prove AI is running
-        # This will now show "SafetyConf=0.9626" in your terminal
         print(f"✅ REAL AI SCAN (NORMAL): Inputs=[P:{target_row['Pressure_Bar']:.2f}, F:{target_row['Flow_Lmin']:.2f}] -> SafetyConf={pred_conf:.4f}")
 
 with col_sidebar:
