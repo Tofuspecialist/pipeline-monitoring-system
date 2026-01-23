@@ -3,7 +3,8 @@ pandas
 numpy
 folium
 streamlit-folium
-tensorflow
-scikit-learn
+streamlit-lottie
+requests
 joblib
-xgboost
+tensorflow
+pyserial
