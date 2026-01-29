@@ -204,7 +204,7 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS incident_log
                  (timestamp TEXT, event_id TEXT, segment_id TEXT, 
-                  pressure_bar REAL, flow_rate REAL, confidence TEXT, status TEXT)''')
+                  pressure_bar REAL, flow_rate REAL, confidence TEXT, status TEXT)''' )
     conn.commit()
     conn.close()
 
@@ -374,6 +374,7 @@ if 'leak_state' not in st.session_state: st.session_state.leak_state = False
 if 'last_hw_event' not in st.session_state: st.session_state.last_hw_event = None
 if 'noise_p' not in st.session_state: st.session_state.noise_p = 0.0
 if 'noise_q' not in st.session_state: st.session_state.noise_q = 0.0
+if 'ai_report_generated' not in st.session_state: st.session_state.ai_report_generated = False
 
 # --- 6. HARDWARE LISTENER (GLOBAL) ---
 hw_trigger = check_hardware_serial()
@@ -425,6 +426,7 @@ with st.sidebar:
         st.session_state.noise_p = np.random.normal(0, 0.05)
         st.session_state.noise_q = np.random.normal(0, 5.0)
         st.session_state.trigger_log = True
+        st.session_state.ai_report_generated = False # Reset AI report
         st.rerun()
 
     st.markdown("---")
@@ -435,6 +437,12 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # --- GENERATIVE AI FEATURE FOR JOB APP ---
+    if st.session_state.leak_state:
+        st.markdown("#### 🤖 AI RESPONSE SYSTEM")
+        if st.button("GENERATE AI INCIDENT REPORT"):
+            st.session_state.ai_report_generated = True
+
     if mode_select == "PROTOTYPE_TEST":
         st.info("HARDWARE LINK ACTIVE")
         pipe_ids = [p['id'] for p in MUNICIPAL_PIPES]
@@ -450,6 +458,7 @@ with st.sidebar:
             if st.button("RESET TRIGGER"):
                 st.session_state.leak_state = False
                 st.session_state.last_hw_event = None
+                st.session_state.ai_report_generated = False
                 st.rerun()
     else:
         # City Simulation Controls
@@ -458,6 +467,8 @@ with st.sidebar:
         # Update state based on toggle if no hardware trigger
         if not st.session_state.last_hw_event:
             st.session_state.leak_state = sim_toggle
+            if not sim_toggle:
+                 st.session_state.ai_report_generated = False
             
         if st.session_state.leak_state:
             pipe_ids = [p['id'] for p in MUNICIPAL_PIPES]
@@ -473,7 +484,31 @@ leaks_active = data["Leak_Status"].sum()
 active_row = data[data['ID'] == st.session_state.selected_segment].iloc[0]
 pred_label, pred_conf, pred_color, pred_analysis = get_ai_prediction(active_row['Pressure_Bar'], active_row['Flow_Lmin'], is_sim)
 
-# --- 10. MAIN DISPLAY LOGIC ---
+# --- 10. GENERATIVE AI FUNCTION ---
+def generate_ai_report(segment_id, pressure, flow):
+    # This mocks an LLM call. In production, you would use:
+    # model = genai.GenerativeModel('gemini-1.5-flash')
+    # response = model.generate_content(...)
+    
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    return f"""
+    **🤖 GENERATIVE AI INCIDENT REPORT [V1.2]**
+    **Time Generated:** {timestamp}
+    **Subject:** CRITICAL INTEGRITY FAILURE - SEGMENT {segment_id}
+    
+    **1. Situation Analysis:**
+    Anomaly detected in Sector {segment_id}. Pressure sensors report a drop to **{pressure:.2f} Bar**, indicating a breach of approximately **{aperture}mm**. Flow rate variance detected at **{flow:.2f} LPM**.
+    
+    **2. Recommended Actions:**
+    * **Immediate:** Isolate Sector {segment_id} by closing Valve Cluster A-4 via remote telemetry.
+    * **Field Ops:** Dispatch rapid response team to GPS coordinates. Verify piezoelectric sensor integrity.
+    * **Safety:** Alert ground maintenance to potential waterlogging in the vicinity.
+    
+    **3. Prediction:**
+    If left unattended, structural failure probability increases to 92% within 2 hours.
+    """
+
+# --- 11. MAIN DISPLAY LOGIC ---
 
 if st.session_state.mode == "PROTOTYPE_TEST":
     # === PROTOTYPE MODE ===
@@ -548,6 +583,13 @@ if st.session_state.mode == "PROTOTYPE_TEST":
             st.markdown('<div class="red-alert-mode" style="position:fixed; top:0; left:0; right:0; bottom:0; pointer-events:none; z-index:99;"></div>', unsafe_allow_html=True)
             
             st.markdown(f"""<div class="alert-box">⚠️ HARDWARE TRIGGER DETECTED<br>SEGMENT: {active_row['ID']}</div>""", unsafe_allow_html=True)
+            
+            # --- AI REPORT DISPLAY ---
+            if st.session_state.ai_report_generated:
+                with st.spinner("🤖 ESTABLISHING UPLINK TO GENERATIVE AI MODEL..."):
+                    time.sleep(1.5) # Fake Latency
+                report = generate_ai_report(active_row['ID'], active_row['Pressure_Bar'], active_row['Flow_Lmin'])
+                st.info(report)
             
             # Detailed TOA Box
             active_pipe = next(p for p in MUNICIPAL_PIPES if p['id'] == active_row['ID'])
@@ -681,6 +723,13 @@ else:
             # === FULL DETAILS FOR SIMULATION ===
             st.markdown(f"""<div class="alert-box">🚨 LEAK CONFIRMED: {active_row['ID']}</div>""", unsafe_allow_html=True)
             
+            # --- AI REPORT DISPLAY ---
+            if st.session_state.ai_report_generated:
+                with st.spinner("🤖 ESTABLISHING UPLINK TO GENERATIVE AI MODEL..."):
+                    time.sleep(1.5) # Fake Latency
+                report = generate_ai_report(active_row['ID'], active_row['Pressure_Bar'], active_row['Flow_Lmin'])
+                st.info(report)
+            
             st.markdown(f"""
             <div class="ai-box">
                 <strong>🧠 AI DIAGNOSTIC REPORT</strong><br>
@@ -754,7 +803,7 @@ with c_table:
             with col_csv:
                 csv_buffer = df_db.to_csv(index=False).encode('utf-8')
                 st.download_button(label="📄 EXPORT CSV LOG", data=csv_buffer, 
-                                 file_name=f"AUDIT_LOG_{datetime.now().strftime('%H%M%S')}.csv", mime="text/csv", use_container_width=True)
+                                     file_name=f"AUDIT_LOG_{datetime.now().strftime('%H%M%S')}.csv", mime="text/csv", use_container_width=True)
             with col_db:
                 with open("leak_history.db", "rb") as fp:
                     st.download_button(
